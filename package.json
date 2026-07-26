@@ -9,6 +9,10 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@handsontable/react-wrapper": "^18.0.0",
+    "ag-grid-community": "^36.0.0",
+    "ag-grid-react": "^36.0.0",
+    "handsontable": "^18.0.0",
     "next": "16.2.10",
     "react": "19.2.4",
     "react-dom": "19.2.4"
