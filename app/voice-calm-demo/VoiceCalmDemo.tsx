@@ -61,6 +61,72 @@ function getMeterBarColor(value: number, cautionThreshold: number, warningThresh
   return "#4fc7a3";
 }
 
+/* =========================================================
+ * 半円形ゲージ(常時表示)
+ * ========================================================= */
+function polarToCartesian(cx: number, cy: number, r: number, angleDeg: number) {
+  const angleRad = (angleDeg * Math.PI) / 180;
+  return { x: cx + r * Math.cos(angleRad), y: cy - r * Math.sin(angleRad) };
+}
+
+function describeArc(cx: number, cy: number, r: number, startAngle: number, endAngle: number) {
+  const start = polarToCartesian(cx, cy, r, startAngle);
+  const end = polarToCartesian(cx, cy, r, endAngle);
+  const largeArcFlag = Math.abs(startAngle - endAngle) > 180 ? 1 : 0;
+  return `M ${start.x} ${start.y} A ${r} ${r} 0 ${largeArcFlag} 1 ${end.x} ${end.y}`;
+}
+
+function valueToAngle(value: number, min: number, max: number) {
+  const clamped = Math.min(max, Math.max(min, value));
+  return 180 - ((clamped - min) / (max - min)) * 180;
+}
+
+function SplGauge({
+  value,
+  minValue,
+  maxValue,
+  cautionThreshold,
+  warningThreshold,
+}: {
+  value: number;
+  minValue: number;
+  maxValue: number;
+  cautionThreshold: number;
+  warningThreshold: number;
+}) {
+  const cx = 84;
+  const cy = 70;
+  const r = 58;
+  const strokeWidth = 9;
+
+  const cautionAngle = valueToAngle(cautionThreshold, minValue, maxValue);
+  const warningAngle = valueToAngle(warningThreshold, minValue, maxValue);
+  const needleAngle = valueToAngle(value, minValue, maxValue);
+  const needleEnd = polarToCartesian(cx, cy, r - strokeWidth - 4, needleAngle);
+
+  return (
+    <svg viewBox="0 0 168 116" width={140} height={97}>
+      <path d={describeArc(cx, cy, r, 180, cautionAngle)} fill="none" stroke="#10b981" strokeWidth={strokeWidth} strokeLinecap="round" />
+      <path d={describeArc(cx, cy, r, cautionAngle, warningAngle)} fill="none" stroke="#f59e0b" strokeWidth={strokeWidth} strokeLinecap="round" />
+      <path d={describeArc(cx, cy, r, warningAngle, 0)} fill="none" stroke="#ef4444" strokeWidth={strokeWidth} strokeLinecap="round" />
+      <line x1={cx} y1={cy} x2={needleEnd.x} y2={needleEnd.y} stroke="#1f2430" strokeWidth={3} strokeLinecap="round" />
+      <circle cx={cx} cy={cy} r={5} fill="#1f2430" />
+      <text x={cx} y={cy + 22} textAnchor="middle" fontSize="20" fontWeight={700} fill="#1f2430">
+        {Math.round(value)}
+      </text>
+      <text x={cx} y={cy + 38} textAnchor="middle" fontSize="10" fill="#6b7280">
+        dB
+      </text>
+      <text x={cx - r - 2} y={cy + 14} textAnchor="middle" fontSize="9" fill="#9aa1af">
+        {minValue}
+      </text>
+      <text x={cx + r + 2} y={cy + 14} textAnchor="middle" fontSize="9" fill="#9aa1af">
+        {maxValue}
+      </text>
+    </svg>
+  );
+}
+
 export default function VoiceCalmDemo() {
   // ========================================================================
   // 状態
@@ -513,7 +579,15 @@ export default function VoiceCalmDemo() {
               {running ? meterStatus.label : "待機中"}
             </span>
           </button>
-
+          <div className="splGaugeWrap">
+            <SplGauge
+              value={running ? meterDb : METER_MIN_DB}
+              minValue={METER_MIN_DB}
+              maxValue={METER_MAX_DB}
+              cautionThreshold={cautionThreshold}
+              warningThreshold={warningThreshold}
+            />
+          </div>
           {meterExpanded && (
             <div className="splPopover">
               <p className="splPopoverTitle">音圧レベル(推定・簡易)</p>
@@ -784,6 +858,11 @@ export default function VoiceCalmDemo() {
           font-size: 12px;
           font-weight: 600;
           margin-left: 4px;
+        }
+        .splGaugeWrap {
+          display: flex;
+          justify-content: center;
+          margin-top: 4px;
         }
         .splPopover {
           position: absolute;
