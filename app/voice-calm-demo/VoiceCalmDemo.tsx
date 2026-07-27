@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo, ChangeEvent } from "react";
 
 type LogEntry = {
   id: number;
@@ -17,6 +17,50 @@ const FIXED_RATIO = 20;
 const FIXED_EQ_FREQ = 3000;
 const FIXED_EQ_GAIN = -12;
 
+/* =========================================================
+ * 音圧レベルメーター(右上バッジ)の設定
+ *
+ * 別画面にあった音圧メーターを、
+ * マイク入力を共有する形でこの画面へ統合したもの。
+ * 独自にgetUserMediaを呼ばず、既存のpreAnalyserからRMSを取得する。
+ * ========================================================= */
+const METER_MIN_DB = 0;
+const METER_MAX_DB = 120;
+const METER_MIN_RELATIVE_DB = -100;
+const METER_MAX_RELATIVE_DB = 0;
+const METER_CALIBRATION_OFFSET_DB = 90;
+const METER_UI_UPDATE_INTERVAL_MS = 200;
+const METER_INITIAL_CAUTION = 70;
+const METER_INITIAL_WARNING = 95;
+
+type MeterStatus = {
+  label: string;
+  color: string;
+  backgroundColor: string;
+};
+
+function convertRelativeDbToEstimatedDb(relativeDb: number): number {
+  if (!Number.isFinite(relativeDb)) return METER_MIN_DB;
+  const estimatedDb = relativeDb + METER_CALIBRATION_OFFSET_DB;
+  return Math.min(METER_MAX_DB, Math.max(METER_MIN_DB, estimatedDb));
+}
+
+function getMeterStatus(value: number, cautionThreshold: number, warningThreshold: number): MeterStatus {
+  if (value >= warningThreshold) {
+    return { label: "警告", color: "#dc2626", backgroundColor: "#fef2f2" };
+  }
+  if (value >= cautionThreshold) {
+    return { label: "注意", color: "#f59e0b", backgroundColor: "#fffbeb" };
+  }
+  return { label: "正常", color: "#10b981", backgroundColor: "#ecfdf5" };
+}
+
+function getMeterBarColor(value: number, cautionThreshold: number, warningThreshold: number): string {
+  if (value >= warningThreshold) return "#ef4444";
+  if (value >= cautionThreshold) return "#f59e0b";
+  return "#4fc7a3";
+}
+
 export default function VoiceCalmDemo() {
   // ========================================================================
   // 状態
@@ -32,6 +76,15 @@ export default function VoiceCalmDemo() {
   const [recordStatus, setRecordStatus] = useState("");
   const [recording, setRecording] = useState(false);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
+
+  // --- 音圧レベルメーター(右上バッジ) ---
+  const [meterDb, setMeterDb] = useState(METER_MIN_DB);
+  const [meterPeakDb, setMeterPeakDb] = useState(METER_MIN_DB);
+  const [meterMinDb, setMeterMinDb] = useState<number | null>(null);
+  const [meterHistory, setMeterHistory] = useState<number[]>([]);
+  const [meterExpanded, setMeterExpanded] = useState(false);
+  const [cautionThreshold, setCautionThreshold] = useState(METER_INITIAL_CAUTION);
+  const [warningThreshold, setWarningThreshold] = useState(METER_INITIAL_WARNING);
 
   // ========================================================================
   // Refs
@@ -54,6 +107,7 @@ export default function VoiceCalmDemo() {
   const postDataRef = useRef<Uint8Array | null>(null);
   const rafIdRef = useRef<number | null>(null);
   const wetOnRef = useRef(true);
+  const meterLastUpdateRef = useRef(0);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<Blob[]>([]);
@@ -69,6 +123,11 @@ export default function VoiceCalmDemo() {
   useEffect(() => {
     currentCallIdRef.current = currentCallId;
   }, [currentCallId]);
+
+  const meterStatus = useMemo(
+    () => getMeterStatus(meterDb, cautionThreshold, warningThreshold),
+    [meterDb, cautionThreshold, warningThreshold]
+  );
 
   // ========================================================================
   // サーバー連携(通話開始の記録・文字起こしの送信)
@@ -159,11 +218,53 @@ export default function VoiceCalmDemo() {
     return Math.sqrt(sumSq / data.length);
   };
 
+  // 音圧レベルメーターの値(現在値・ピーク・最小・履歴)を更新する
+  const updateMeterFromRms = (rms: number) => {
+    const relativeDb = rms > 0 ? 20 * Math.log10(rms) : METER_MIN_RELATIVE_DB;
+    const clampedRelativeDb = Math.max(
+      METER_MIN_RELATIVE_DB,
+      Math.min(METER_MAX_RELATIVE_DB, relativeDb)
+    );
+    const estimatedDb = convertRelativeDbToEstimatedDb(clampedRelativeDb);
+
+    const now = performance.now();
+    if (now - meterLastUpdateRef.current < METER_UI_UPDATE_INTERVAL_MS) return;
+    meterLastUpdateRef.current = now;
+
+    const rounded = Math.round(estimatedDb);
+    setMeterDb(rounded);
+    setMeterPeakDb((prev) => Math.max(prev, rounded));
+    setMeterMinDb((prev) => (prev === null ? rounded : Math.min(prev, rounded)));
+    setMeterHistory((prev) => [...prev, rounded].slice(-24));
+  };
+
+  const resetMeter = () => {
+    setMeterDb(METER_MIN_DB);
+    setMeterPeakDb(METER_MIN_DB);
+    setMeterMinDb(null);
+    setMeterHistory([]);
+    meterLastUpdateRef.current = 0;
+  };
+
+  const handleCautionThreshold = (event: ChangeEvent<HTMLInputElement>) => {
+    const requestedValue = Number(event.target.value);
+    setCautionThreshold(Math.min(requestedValue, warningThreshold - 1));
+  };
+
+  const handleWarningThreshold = (event: ChangeEvent<HTMLInputElement>) => {
+    const requestedValue = Number(event.target.value);
+    setWarningThreshold(Math.max(requestedValue, cautionThreshold + 1));
+  };
+
   const dspLoop = () => {
     if (!runningRef.current) return;
-    if (preAnalyserRef.current && preDataRef.current && preBarRef.current) {
+    if (preAnalyserRef.current && preDataRef.current) {
       const preRms = rmsOf(preAnalyserRef.current, preDataRef.current);
-      preBarRef.current.style.width = Math.min(100, Math.round(preRms * 260)) + "%";
+      if (preBarRef.current) {
+        preBarRef.current.style.width = Math.min(100, Math.round(preRms * 260)) + "%";
+      }
+      // 音圧レベルメーター(右上バッジ)も同じRMSから更新する
+      updateMeterFromRms(preRms);
     }
     if (postAnalyserRef.current && postDataRef.current && postBarRef.current) {
       const postRms = rmsOf(postAnalyserRef.current, postDataRef.current);
@@ -250,6 +351,7 @@ export default function VoiceCalmDemo() {
       wetOnRef.current = true;
       setRunning(true);
       setWetOn(true);
+      resetMeter();
       setStatusNote("マイク入力を処理中です(ヘッドホン推奨)。話すと自動で文字起こしされます。");
       dspLoop();
 
@@ -307,6 +409,7 @@ export default function VoiceCalmDemo() {
 
     setCurrentCallId(null);
     setStatusNote("停止しました。");
+    resetMeter();
   };
 
   const toggleWet = () => {
@@ -388,10 +491,93 @@ export default function VoiceCalmDemo() {
   return (
     <div className="wrap">
       <div className="header">
-        <h1>コールセンター向け 音声加工 + 文字起こしデモ</h1>
-        <p className="subtitle">
-          マイクの声をリアルタイムでコンプレッサー + EQ + ロボットボイスで加工しつつ、同時に文字起こしとFastAPIへの通話記録も行います
-        </p>
+        <div>
+          <h1>コールセンター向け 音声加工 + 文字起こしデモ</h1>
+          <p className="subtitle">
+            マイクの声をリアルタイムでコンプレッサー + EQ + ロボットボイスで加工しつつ、同時に文字起こしとFastAPIへの通話記録も行います
+          </p>
+        </div>
+
+        {/* 右上:音圧レベルメーター(バッジ)。クリックで詳細を展開 */}
+        <div className="splMeter">
+          <button
+            type="button"
+            className="splBadge"
+            onClick={() => setMeterExpanded((v) => !v)}
+            style={{ borderColor: meterStatus.color, background: meterStatus.backgroundColor }}
+          >
+            <span className="splDot" style={{ background: meterStatus.color }} />
+            <span className="splValue">{running ? meterDb : "--"}</span>
+            <span className="splUnit">dB</span>
+            <span className="splLabel" style={{ color: meterStatus.color }}>
+              {running ? meterStatus.label : "待機中"}
+            </span>
+          </button>
+
+          {meterExpanded && (
+            <div className="splPopover">
+              <p className="splPopoverTitle">音圧レベル(推定・簡易)</p>
+
+              <div className="splSummary">
+                <div>
+                  <span>ピーク</span>
+                  <strong>{meterPeakDb} dB</strong>
+                </div>
+                <div>
+                  <span>最小</span>
+                  <strong>{meterMinDb ?? 0} dB</strong>
+                </div>
+              </div>
+
+              <div className="splHistory">
+                {meterHistory.length === 0 ? (
+                  <span className="splHistoryEmpty">まだ履歴はありません</span>
+                ) : (
+                  meterHistory.map((dbValue, index) => {
+                    const ratio = (dbValue - METER_MIN_DB) / (METER_MAX_DB - METER_MIN_DB);
+                    return (
+                      <div
+                        key={`${index}-${dbValue}`}
+                        className="splHistoryBar"
+                        title={`${dbValue} dB`}
+                        style={{
+                          height: `${12 + ratio * 30}px`,
+                          backgroundColor: getMeterBarColor(dbValue, cautionThreshold, warningThreshold),
+                        }}
+                      />
+                    );
+                  })
+                )}
+              </div>
+
+              <div className="splThresholdRow">
+                <label htmlFor="spl-caution">注意</label>
+                <input
+                  id="spl-caution"
+                  type="range"
+                  min={METER_MIN_DB + 1}
+                  max={METER_MAX_DB - 2}
+                  value={cautionThreshold}
+                  onChange={handleCautionThreshold}
+                />
+                <output>{cautionThreshold}dB</output>
+              </div>
+
+              <div className="splThresholdRow">
+                <label htmlFor="spl-warning">警告</label>
+                <input
+                  id="spl-warning"
+                  type="range"
+                  min={METER_MIN_DB + 2}
+                  max={METER_MAX_DB - 1}
+                  value={warningThreshold}
+                  onChange={handleWarningThreshold}
+                />
+                <output>{warningThreshold}dB</output>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="layout">
@@ -545,6 +731,11 @@ export default function VoiceCalmDemo() {
         .header {
           max-width: 1400px;
           margin: 0 auto 20px;
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 20px;
+          flex-wrap: wrap;
         }
         .header h1 {
           font-size: 20px;
@@ -557,6 +748,117 @@ export default function VoiceCalmDemo() {
           color: #6b7280;
           margin: 6px 0 0;
         }
+
+        /* 右上:音圧レベルメーター */
+        .splMeter {
+          position: relative;
+          flex-shrink: 0;
+        }
+        .splBadge {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          padding: 8px 12px;
+          border: 1px solid #d8dbe2;
+          border-radius: 999px;
+          background: #ffffff;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+        .splDot {
+          width: 8px;
+          height: 8px;
+          border-radius: 50%;
+          flex-shrink: 0;
+        }
+        .splValue {
+          font-size: 15px;
+          font-weight: 700;
+          color: #1f2430;
+        }
+        .splUnit {
+          font-size: 11px;
+          color: #6b7280;
+        }
+        .splLabel {
+          font-size: 12px;
+          font-weight: 600;
+          margin-left: 4px;
+        }
+        .splPopover {
+          position: absolute;
+          top: calc(100% + 8px);
+          right: 0;
+          width: 240px;
+          background: #ffffff;
+          border: 1px solid #e5e7eb;
+          border-radius: 10px;
+          padding: 14px 16px;
+          box-shadow: 0 8px 24px rgba(16, 24, 40, 0.12);
+          z-index: 20;
+        }
+        .splPopoverTitle {
+          margin: 0 0 10px;
+          font-size: 12px;
+          font-weight: 600;
+          color: #111318;
+        }
+        .splSummary {
+          display: flex;
+          gap: 20px;
+          margin-bottom: 12px;
+        }
+        .splSummary div {
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+        }
+        .splSummary span {
+          font-size: 11px;
+          color: #6b7280;
+        }
+        .splSummary strong {
+          font-size: 14px;
+          color: #111318;
+        }
+        .splHistory {
+          display: flex;
+          align-items: flex-end;
+          gap: 3px;
+          min-height: 42px;
+          margin-bottom: 14px;
+        }
+        .splHistoryEmpty {
+          font-size: 11px;
+          color: #9aa1af;
+        }
+        .splHistoryBar {
+          width: 6px;
+          min-width: 6px;
+          border-radius: 2px 2px 0 0;
+        }
+        .splThresholdRow {
+          display: grid;
+          grid-template-columns: 32px 1fr 44px;
+          align-items: center;
+          gap: 8px;
+          margin-bottom: 8px;
+        }
+        .splThresholdRow label {
+          font-size: 11px;
+          color: #4b5160;
+        }
+        .splThresholdRow input {
+          width: 100%;
+          accent-color: #e3a000;
+        }
+        .splThresholdRow output {
+          font-size: 11px;
+          font-weight: 600;
+          text-align: right;
+          color: #374151;
+        }
+
         .layout {
           max-width: 1400px;
           margin: 0 auto;
